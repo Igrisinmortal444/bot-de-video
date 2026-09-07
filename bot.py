@@ -46,6 +46,9 @@ TWITTER_RE = re.compile(
 )
 
 COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+YOUTUBE_COOKIES_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "youtube_cookies.txt"
+)
 
 # Archivos intermedios de yt-dlp: ejemplo "titulo [id].f137.mp4"
 INTERMEDIATE = re.compile(r"\.f\d+\.[^/\\]+$")
@@ -91,11 +94,19 @@ def build_opts(workdir: str, url: str | None = None) -> dict:
                 COOKIES_FILE,
             )
     elif url and YOUTUBE_RE.search(url):
-        opts["extractor_args"] = {
-            "youtube": {
-                "player_client": YOUTUBE_CLIENTS,
+        if os.path.isfile(YOUTUBE_COOKIES_FILE):
+            opts["cookiefile"] = YOUTUBE_COOKIES_FILE
+        else:
+            opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": YOUTUBE_CLIENTS,
+                }
             }
-        }
+            logger.warning(
+                "URL de YouTube detectada pero no existe %s. "
+                "Las IPs de datacenter (Render) suelen exigir cookies.",
+                YOUTUBE_COOKIES_FILE,
+            )
     opts.update(EXTRA_OPTS)
     return opts
 
