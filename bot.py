@@ -35,6 +35,12 @@ UA = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
+# Clientes de extracción robustos para YouTube (evitan el anti-bot de IP
+# de datacenter tipo Render que rompe la extracción por defecto).
+YOUTUBE_CLIENTS = ["android", "tv", "android_vr", "ios"]
+
+YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)/", re.IGNORECASE)
+
 TWITTER_RE = re.compile(
     r"(twitter\.com|x\.com|t\.co)/", re.IGNORECASE
 )
@@ -84,6 +90,12 @@ def build_opts(workdir: str, url: str | None = None) -> dict:
                 "Twitter suele exigir cookies. Usa cookies.txt para evitar fallos.",
                 COOKIES_FILE,
             )
+    elif url and YOUTUBE_RE.search(url):
+        opts["extractor_args"] = {
+            "youtube": {
+                "player_client": YOUTUBE_CLIENTS,
+            }
+        }
     opts.update(EXTRA_OPTS)
     return opts
 
