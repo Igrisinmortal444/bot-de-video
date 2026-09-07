@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram Video Downloader Bot
+After=network.target
+
+[Service]
+Type=simple
+User=proyecto
+WorkingDirectory=/home/proyecto/tg_downloader
+Environment=PATH=/home/proyecto/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/proyecto/tg_downloader/venv/bin/python /home/proyecto/tg_downloader/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
