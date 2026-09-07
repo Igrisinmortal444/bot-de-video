@@ -7,6 +7,7 @@ import subprocess
 import time
 import uuid
 
+from aiohttp import ClientSession, ClientTimeout, web
 import yt_dlp
 from telegram import Update
 from telegram.constants import ChatAction
@@ -312,7 +313,41 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     d.cleanup()
 
 
-def main() -> None:
+async def health_server() -> None:
+    """Servidor HTTP de salud para Render ($PORT); el bot sigue en polling."""
+
+    async def ok(_: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_get("/", ok)
+    app.router.add_get("/health", ok)
+    port = int(os.getenv("PORT", "10000"))
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    logger.info("🩺 Health HTTP server en puerto %s", port)
+
+
+async def keepalive() -> None:
+    """Ping silencioso cada 13 min para evitar el sleep de Render (free: 15 min)."""
+    external = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not external:
+        return
+    url = f"{external}/health"
+    timeout = ClientTimeout(total=15)
+    async with ClientSession() as session:
+        while True:
+            await asyncio.sleep(13 * 60)
+            try:
+                async with session.get(url, timeout=timeout) as resp:
+                    await resp.read()
+            except Exception:
+                pass
+
+
+async def main() -> None:
     if BOT_TOKEN.startswith("PON_AQUI"):
         print("ERROR: Debes configurar BOT_TOKEN en config.py")
         return
@@ -330,9 +365,22 @@ def main() -> None:
     app.add_handler(CommandHandler("audio", handle_audio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot iniciado. Pulsa Ctrl+C para detener.")
-    app.run_polling()
+    logger.info("Bot iniciado. Pulsa Ctrl+C para detener.")
+    await app.initialize()
+    await health_server()
+    asyncio.create_task(keepalive())
+    await app.updater.start_polling()
+    await app.start()
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        pass
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
