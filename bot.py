@@ -58,15 +58,14 @@ def build_opts(workdir: str, url: str | None = None) -> dict:
     opts = {
         "outtmpl": os.path.join(workdir, "video_%(id)s.%(ext)s"),
         "format": (
-            "bv*[ext=mp4][vcodec^=avc1][filesize<47M]+ba[ext=m4a]"
-            "/b[ext=mp4][vcodec^=avc1][filesize<47M]"
-            "/bv*[ext=mp4][filesize<47M]+ba[ext=m4a]"
-            "/b[ext=mp4][filesize<47M]"
+            "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]"
+            "/b[ext=mp4][vcodec^=avc1]"
+            "/bv*[ext=mp4]+ba[ext=m4a]"
+            "/b[ext=mp4]"
             "/bv*+ba/b"
             "/wv*+wa/w"
         ),
         "merge_output_format": "mp4",
-        "max_filesize": 49_000_000,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -164,10 +163,6 @@ def ensure_valid_mp4(path: str) -> str:
 
 async def send_big_file(update: Update, path: str, caption: str = "") -> None:
     size = os.path.getsize(path)
-    if size > 50_000_000:
-        await update.message.reply_text("El archivo supera los 50 MB, Telegram no puede enviarlo.")
-        return
-
     await update.message.chat.send_action(ChatAction.UPLOAD_VIDEO if size <= MAX_SIZE else ChatAction.UPLOAD_DOCUMENT)
 
     if size > MAX_SIZE:
@@ -249,6 +244,34 @@ class Downloader:
     def cleanup(self):
         shutil.rmtree(self.workdir, ignore_errors=True)
 
+    def _build_attempts(self, opts: dict, mode: str) -> list[dict]:
+        """Configuraciones en cascada: si una falla (anti-bot de YouTube,
+        formatos no disponibles), se prueba la siguiente con más flexibilidad."""
+        if not YOUTUBE_RE.search(self.url):
+            return [opts]
+
+        relaxed_format = "bv*+ba/b/wv*+wa/w"
+        if mode == "audio":
+            relaxed_format = "bestaudio/best"
+
+        attempts = [opts]
+        relaxed = dict(opts)
+        relaxed["format"] = relaxed_format
+        attempts.append(relaxed)
+
+        android = dict(relaxed)
+        android["extractor_args"] = {
+            "youtube": {"player_client": ["android", "tv", "android_vr"]}
+        }
+        attempts.append(android)
+
+        web_sdk = dict(relaxed)
+        web_sdk["extractor_args"] = {
+            "youtube": {"player_client": ["tv", "web"]}
+        }
+        attempts.append(web_sdk)
+        return attempts
+
     def run(self, mode: str) -> tuple[bool, str]:
         if mode == "audio":
             opts = build_opts(self.workdir, self.url)
@@ -265,11 +288,20 @@ class Downloader:
 
         opts["progress_hooks"] = [download_progress_hook]
 
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([self.url])
-        except Exception as exc:
-            logger.error("Error de descarga: %s", exc)
+        errors: list[str] = []
+        succeeded = False
+        for i, attempt in enumerate(self._build_attempts(opts, mode), 1):
+            logger.info("Intento %d/%d de descarga", i, len(self._build_attempts(opts, mode)))
+            try:
+                with yt_dlp.YoutubeDL(attempt) as ydl:
+                    ydl.download([self.url])
+                succeeded = True
+                break
+            except Exception as exc:
+                logger.error("Intento %d falló: %s", i, exc)
+                errors.append(str(exc).strip())
+
+        if not succeeded:
             if TWITTER_RE.search(self.url):
                 hint = ""
                 if not os.path.isfile(COOKIES_FILE):
@@ -280,9 +312,10 @@ class Downloader:
                         "junto a bot.py y reiniciar el bot."
                     )
                 return False, (
-                    f"⚠️ No se pudo descargar el video de Twitter/X. Error: {exc}{hint}"
+                    f"⚠️ No se pudo descargar el video de Twitter/X. Error: {errors[-1]}{hint}"
                 )
-            return False, f"⚠️ No se pudo descargar. Error: {exc}"
+            last = errors[-1] if errors else "desconocido"
+            return False, f"⚠️ No se pudo descargar. Error: {last}"
 
         path = look_for_file(self.workdir)
         if not path:
