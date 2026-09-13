@@ -54,7 +54,9 @@ YOUTUBE_COOKIES_FILE = os.path.join(
 INTERMEDIATE = re.compile(r"\.f\d+\.[^/\\]+$")
 
 
-def build_opts(workdir: str, url: str | None = None) -> dict:
+def build_opts(
+    workdir: str, url: str | None = None, twitter_cookies: bool = True
+) -> dict:
     opts = {
         "outtmpl": os.path.join(workdir, "video_%(id)s.%(ext)s"),
         "format": (
@@ -85,7 +87,8 @@ def build_opts(workdir: str, url: str | None = None) -> dict:
             }
         }
         if os.path.isfile(COOKIES_FILE):
-            opts["cookiefile"] = COOKIES_FILE
+            if twitter_cookies:
+                opts["cookiefile"] = COOKIES_FILE
         else:
             logger.warning(
                 "URL de Twitter/X detectada pero no existe %s. "
@@ -247,30 +250,39 @@ class Downloader:
     def _build_attempts(self, opts: dict, mode: str) -> list[dict]:
         """Configuraciones en cascada: si una falla (anti-bot de YouTube,
         formatos no disponibles), se prueba la siguiente con más flexibilidad."""
-        if not YOUTUBE_RE.search(self.url):
-            return [opts]
+        if YOUTUBE_RE.search(self.url):
+            relaxed_format = "bv*+ba/b/wv*+wa/w"
+            if mode == "audio":
+                relaxed_format = "bestaudio/best"
 
-        relaxed_format = "bv*+ba/b/wv*+wa/w"
-        if mode == "audio":
-            relaxed_format = "bestaudio/best"
+            attempts = [opts]
+            relaxed = dict(opts)
+            relaxed["format"] = relaxed_format
+            attempts.append(relaxed)
 
-        attempts = [opts]
-        relaxed = dict(opts)
-        relaxed["format"] = relaxed_format
-        attempts.append(relaxed)
+            android = dict(relaxed)
+            android["extractor_args"] = {
+                "youtube": {"player_client": ["android", "tv", "android_vr"]}
+            }
+            attempts.append(android)
 
-        android = dict(relaxed)
-        android["extractor_args"] = {
-            "youtube": {"player_client": ["android", "tv", "android_vr"]}
-        }
-        attempts.append(android)
+            web_sdk = dict(relaxed)
+            web_sdk["extractor_args"] = {
+                "youtube": {"player_client": ["tv", "web"]}
+            }
+            attempts.append(web_sdk)
+            return attempts
 
-        web_sdk = dict(relaxed)
-        web_sdk["extractor_args"] = {
-            "youtube": {"player_client": ["tv", "web"]}
-        }
-        attempts.append(web_sdk)
-        return attempts
+        if TWITTER_RE.search(self.url) and opts.get("cookiefile"):
+            logger.info(
+                "Twitter/X: hay cookies locales; si fallan se reintenta en "
+                "modo invitado (sin cookies) para videos públicos."
+            )
+            guest = dict(opts)
+            guest.pop("cookiefile", None)
+            return [opts, guest]
+
+        return [opts]
 
     def run(self, mode: str) -> tuple[bool, str]:
         if mode == "audio":
@@ -339,6 +351,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     url = update.message.text.strip()
     if not url.startswith("http"):
         await update.message.reply_text("⚠️ Eso no parece un enlace válido.")
+        return
+    if TWITTER_RE.search(url) and not re.search(r"/status/\d+", url):
+        await update.message.reply_text(
+            "🕊️ Ese enlace de Twitter/X no apunta a un post con video.\n\n"
+            "Pega el enlace directo de un tweet que tenga video, por ejemplo:\n"
+            "`x.com/usuario/status/1234567890123456789`",
+            parse_mode="Markdown",
+        )
         return
     d = Downloader(update, url)
     await update.message.reply_text("⬇️ Descargando video... esto puede tomar unos segundos.")
