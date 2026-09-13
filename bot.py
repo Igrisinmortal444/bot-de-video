@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
 import subprocess
 import time
+import urllib.request
 import uuid
 
 from aiohttp import ClientSession, ClientTimeout, web
@@ -44,6 +46,8 @@ YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)/", re.IGNORECASE)
 TWITTER_RE = re.compile(
     r"(twitter\.com|x\.com|t\.co)/", re.IGNORECASE
 )
+
+TWITTER_STATUS_RE = re.compile(r"/status/(\d{15,20})", re.IGNORECASE)
 
 COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
 YOUTUBE_COOKIES_FILE = os.path.join(
@@ -284,6 +288,65 @@ class Downloader:
 
         return [opts]
 
+    def _twitter_api_fallback(self) -> str | None:
+        """Último recurso para X/Twitter: cuando yt-dlp no encuentra video
+        (tweets marcados como contenido sensible, que X oculta al invitado),
+        pedimos la URL directa a la API de fxtwitter y la descargamos."""
+        m = TWITTER_STATUS_RE.search(self.url)
+        if not m:
+            return None
+        tweet_id = m.group(1)
+        api = f"https://api.fxtwitter.com/status/{tweet_id}"
+        try:
+            req = urllib.request.Request(
+                api,
+                headers={"User-Agent": UA, "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as exc:
+            logger.warning("Twitter API fallback: %s", exc)
+            return None
+        if data.get("code") != 200:
+            logger.info("Twitter API fallback: %s", data.get("message"))
+            return None
+
+        media = (data.get("tweet") or {}).get("media") or {}
+        direct: str | None = None
+        for item in media.get("all") or []:
+            if item.get("type") not in ("video", "gif"):
+                continue
+            mps = [
+                f for f in item.get("formats") or []
+                if f.get("container") == "mp4" and f.get("url")
+            ]
+            if mps:
+                direct = max(mps, key=lambda f: f.get("bitrate") or 0)["url"]
+            else:
+                direct = item.get("url")
+            break
+        if not direct:
+            logger.info("Twitter API fallback: el tweet no tiene video")
+            return None
+
+        target = os.path.join(self.workdir, f"video_{tweet_id}.mp4")
+        try:
+            dl = urllib.request.Request(
+                direct,
+                headers={"User-Agent": UA, "Referer": "https://x.com/"},
+            )
+            with urllib.request.urlopen(dl, timeout=120) as resp, open(
+                target, "wb"
+            ) as fh:
+                shutil.copyfileobj(resp, fh)
+        except Exception as exc:
+            logger.warning("Twitter API fallback al descargar: %s", exc)
+            return None
+        if os.path.getsize(target) < 1024:
+            return None
+        logger.info("Twitter API fallback: video descargado (sensible/oculto)")
+        return target
+
     def run(self, mode: str) -> tuple[bool, str]:
         if mode == "audio":
             opts = build_opts(self.workdir, self.url)
@@ -315,6 +378,10 @@ class Downloader:
 
         if not succeeded:
             if TWITTER_RE.search(self.url):
+                if mode == "video":
+                    path = self._twitter_api_fallback()
+                    if path:
+                        return True, path
                 hint = ""
                 if not os.path.isfile(COOKIES_FILE):
                     hint = (
@@ -323,8 +390,9 @@ class Downloader:
                         "(extension 'Get cookies.txt LOCALLY') a un archivo `cookies.txt` "
                         "junto a bot.py y reiniciar el bot."
                     )
+                last = errors[-1] if errors else "desconocido"
                 return False, (
-                    f"⚠️ No se pudo descargar el video de Twitter/X. Error: {errors[-1]}{hint}"
+                    f"⚠️ No se pudo descargar el video de Twitter/X. Error: {last}{hint}"
                 )
             last = errors[-1] if errors else "desconocido"
             return False, f"⚠️ No se pudo descargar. Error: {last}"
